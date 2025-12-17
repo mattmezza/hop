@@ -162,16 +162,14 @@ After session creation or lookup:
 
 ### FR-8: Session Naming Strategy
 
-Session names derived using parent-prefix format:
-```
-<parent_dir>-<project_dir>
-```
+Session names use the project directory name by default. If another registered project has the same directory name (collision), the parent directory is prepended:
 
-| Path | Session Name |
-|------|--------------|
-| `/home/user/work/api` | `work-api` |
-| `/home/user/personal/api` | `personal-api` |
-| `/home/user/projects/foo` | `projects-foo` |
+| Scenario | Path | Session Name |
+|----------|------|--------------|
+| No collision | `/home/user/work/api` | `api` |
+| Collision (both have `api`) | `/home/user/work/api` | `work-api` |
+| Collision (both have `api`) | `/home/user/personal/api` | `personal-api` |
+| No collision | `/home/user/projects/foo` | `foo` |
 
 Characters invalid for tmux session names (`.`, `:`) shall be replaced with `_`.
 
@@ -186,8 +184,8 @@ hop list
 
 Output format:
 ```
-work-api        /home/user/work/api         [backend]    ✓
-personal-api    /home/user/personal/api     [default]    ⚠ hash mismatch
+api             /home/user/work/api         [backend]    ✓
+blog            /home/user/personal/blog    [default]    ⚠ hash mismatch
 old-project     /home/user/old              [node]       ✗ path missing
 ```
 

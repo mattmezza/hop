@@ -90,17 +90,35 @@ compute_hash() {
     sha256sum "$1" 2>/dev/null | cut -d' ' -f1
 }
 
-# Derive session name from path: /home/user/work/api -> work-api
+# Derive session name from path
+# Uses just directory name (e.g., "api"), but if another registered project
+# has the same name, uses parent-project format (e.g., "work-api")
 get_session_name() {
     local path="$1"
-    local parent project name
+    local project parent name
 
-    parent=$(basename "$(dirname "$path")")
     project=$(basename "$path")
-    name="${parent}-${project}"
-
     # Replace invalid tmux session name characters (. and :) with _
-    echo "${name//[.:]/_}"
+    name="${project//[.:]/_}"
+
+    # Check for collision: another path in registry with same base name
+    if [[ -f "$REGISTRY_FILE" ]]; then
+        while IFS=: read -r reg_path _ _; do
+            [[ -z "$reg_path" || "$reg_path" == \#* ]] && continue
+            [[ "$reg_path" == "$path" ]] && continue  # Skip self
+            local reg_project=$(basename "$reg_path")
+            reg_project="${reg_project//[.:]/_}"
+            if [[ "$reg_project" == "$name" ]]; then
+                # Collision found, use parent-project format
+                parent=$(basename "$(dirname "$path")")
+                parent="${parent//[.:]/_}"
+                name="${parent}-${project//[.:]/_}"
+                break
+            fi
+        done < "$REGISTRY_FILE"
+    fi
+
+    echo "$name"
 }
 
 # Normalize path to absolute
@@ -643,9 +661,26 @@ cmd_select() {
     local preview_cmd
     preview_cmd="bash -c '
         path={}
-        parent=\$(basename \"\$(dirname \"\$path\")\")
+        registry=\"$REGISTRY_FILE\"
         project=\$(basename \"\$path\")
-        session=\$(echo \"\${parent}-\${project}\" | tr \".:\" \"_\")
+        session=\"\${project//[.:]/_}\"
+
+        # Check for collision in registry
+        if [[ -f \"\$registry\" ]]; then
+            while IFS=: read -r reg_path _ _; do
+                [[ -z \"\$reg_path\" || \"\$reg_path\" == \"#\"* ]] && continue
+                [[ \"\$reg_path\" == \"\$path\" ]] && continue
+                reg_project=\$(basename \"\$reg_path\")
+                reg_project=\"\${reg_project//[.:]/_}\"
+                if [[ \"\$reg_project\" == \"\$session\" ]]; then
+                    parent=\$(basename \"\$(dirname \"\$path\")\")
+                    parent=\"\${parent//[.:]/_}\"
+                    session=\"\${parent}-\${project//[.:]/_}\"
+                    break
+                fi
+            done < \"\$registry\"
+        fi
+
         if tmux has-session -t \"\$session\" 2>/dev/null; then
             echo \"Session: \$session (active)\"
             echo \"---\"

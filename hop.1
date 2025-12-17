@@ -167,12 +167,14 @@ tmux select-window -t "$SESSION_NAME:1"
 .fi
 .RE
 .SH SESSION NAMING
-Session names are derived from the project path using the format:
-.IR parent-project .
-For example,
+Session names use the project directory name by default (e.g.,
 .I /home/user/work/api
 becomes
-.IR work-api .
+.IR api ).
+If another registered project has the same directory name, the parent directory is prepended to avoid collisions (e.g.,
+.I work-api
+and
+.IR personal-api ).
 Characters invalid for tmux session names (. and :) are replaced with underscore.
 .SH EXAMPLES
 .TP
