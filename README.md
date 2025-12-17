@@ -29,6 +29,9 @@ That's it. A fuzzy finder appears. Pick a project. You're there—windows config
 # Install
 curl -fsSL https://raw.githubusercontent.com/mattmezza/hop/main/install.sh | bash
 
+# Or install to a custom location
+curl -fsSL https://raw.githubusercontent.com/mattmezza/hop/main/install.sh | HOP_BIN_DIR=/usr/local/bin bash
+
 # Mark your first project
 cd ~/work/my-app
 hop mark default

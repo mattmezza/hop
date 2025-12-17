@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 #
 # hop installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/mattmezza/hop/main/install.sh | bash
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/mattmezza/hop/main/install.sh | bash
+#
+# Options:
+#   --bin-dir=<path>    Install hop to <path> (default: ~/.local/bin)
+#   --help              Show this help
+#
+# Environment variables:
+#   HOP_BIN_DIR         Same as --bin-dir (useful for piped installs)
+#
+# Examples:
+#   # Default installation
+#   curl -fsSL .../install.sh | bash
+#
+#   # Custom bin directory (piped)
+#   curl -fsSL .../install.sh | HOP_BIN_DIR=/usr/local/bin bash
+#
+#   # Custom bin directory (direct)
+#   ./install.sh --bin-dir=/usr/local/bin
 #
 
 set -euo pipefail
 
 GITHUB_REPO="mattmezza/hop"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="${HOP_BIN_DIR:-$HOME/.local/bin}"
 MAN_DIR="$HOME/.local/share/man/man1"
 CONFIG_DIR="$HOME/.config/hop"
 TEMPLATES_DIR="$CONFIG_DIR/templates"
@@ -36,6 +55,32 @@ warn() {
     echo "${YELLOW}$*${RESET}"
 }
 
+show_help() {
+    sed -n '3,24p' "$0" | sed 's/^# \?//'
+    exit 0
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bin-dir=*)
+                BIN_DIR="${1#*=}"
+                shift
+                ;;
+            --bin-dir)
+                BIN_DIR="$2"
+                shift 2
+                ;;
+            --help|-h)
+                show_help
+                ;;
+            *)
+                die "Unknown option: $1. Use --help for usage."
+                ;;
+        esac
+    done
+}
+
 # Check dependencies
 check_dependencies() {
     local missing=()
@@ -61,6 +106,8 @@ get_latest_version() {
 }
 
 main() {
+    parse_args "$@"
+
     echo "${BOLD}Installing hop...${RESET}"
     echo ""
 
@@ -145,7 +192,7 @@ EOF
         warn "Note: $BIN_DIR is not in your PATH."
         echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
         echo ""
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "  export PATH=\"$BIN_DIR:\$PATH\""
         echo ""
     fi
 
