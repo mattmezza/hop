@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants & Configuration
 # ==============================================================================
 
-HOP_VERSION="0.3.0"
+HOP_VERSION="0.3.1"
 GITHUB_REPO="mattmezza/hop"
 REGISTRY_FILE="$HOME/.hop-projects"
 TEMPLATES_DIR="$HOME/.config/hop/templates"
