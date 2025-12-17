@@ -774,9 +774,8 @@ cmd_self_update() {
     if version_gt "$latest" "$current_version"; then
         echo "New version available: $latest (current: $current_version)"
         echo "Updating..."
-        curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh" | bash
-        # Exit immediately - the script file was just replaced, continuing would read garbage
-        exit 0
+        # Use exec to replace this process - prevents reading from modified script
+        exec bash -c "curl -fsSL 'https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh' | bash"
     else
         info "Already at latest version ($current_version)"
     fi
