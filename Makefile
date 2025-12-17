@@ -9,6 +9,8 @@ release: check-version
 	@# Commit the version bump
 	@git add hop
 	@git commit -m "Release $(name)"
+	@# Push the Commit
+	@git push origin main
 	@# Create GitHub release (this also creates the tag)
 	@gh release create $(name) --title "$(name)" --generate-notes
 	@echo ""
