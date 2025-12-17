@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Testing artifacts
+*.tar.gz
+hop-v*/
+
+# Local config (for development)
+.tmux-session

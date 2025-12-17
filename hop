@@ -1,0 +1,1100 @@
+#!/usr/bin/env bash
+#
+# hop - tmux project session manager
+# https://github.com/mattmezza/hop
+#
+
+set -euo pipefail
+
+# ==============================================================================
+# Constants & Configuration
+# ==============================================================================
+
+HOP_VERSION="0.1"
+GITHUB_REPO="mattmezza/hop"
+REGISTRY_FILE="$HOME/.hop-projects"
+TEMPLATES_DIR="$HOME/.config/hop/templates"
+VERSION_FILE="$HOME/.config/hop/.version"
+DRY_RUN=false
+
+# Default template content (embedded for auto-initialization)
+DEFAULT_TEMPLATE='#!/usr/bin/env bash
+# Default template - single window
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "default"'
+
+# ==============================================================================
+# Color & Output Helpers
+# ==============================================================================
+
+# Colors (disabled if not a terminal)
+if [[ -t 1 ]]; then
+    RED=$'\e[31m'
+    GREEN=$'\e[32m'
+    YELLOW=$'\e[33m'
+    CYAN=$'\e[36m'
+    BOLD=$'\e[1m'
+    RESET=$'\e[0m'
+else
+    RED="" GREEN="" YELLOW="" CYAN="" BOLD="" RESET=""
+fi
+
+# Symbols
+SYM_OK="${GREEN}✓${RESET}"
+SYM_WARN="${YELLOW}⚠${RESET}"
+SYM_ERR="${RED}✗${RESET}"
+
+die() {
+    echo "${RED}Error:${RESET} $*" >&2
+    exit 1
+}
+
+warn() {
+    echo "${YELLOW}Warning:${RESET} $*" >&2
+}
+
+info() {
+    echo "${GREEN}$*${RESET}"
+}
+
+dry_run_msg() {
+    echo "${CYAN}[dry-run]${RESET} $*"
+}
+
+# ==============================================================================
+# Utility Functions
+# ==============================================================================
+
+# Check bash version (require 4.0+)
+check_bash_version() {
+    if ((BASH_VERSINFO[0] < 4)); then
+        die "Bash 4.0+ required (found ${BASH_VERSION})"
+    fi
+}
+
+# Check required dependencies
+check_dependencies() {
+    local missing=()
+    command -v tmux &>/dev/null || missing+=("tmux")
+    command -v fzf &>/dev/null || missing+=("fzf")
+    command -v sha256sum &>/dev/null || missing+=("sha256sum (coreutils)")
+
+    if ((${#missing[@]} > 0)); then
+        die "Missing dependencies: ${missing[*]}"
+    fi
+}
+
+# Compute SHA-256 hash of a file
+compute_hash() {
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Derive session name from path: /home/user/work/api -> work-api
+get_session_name() {
+    local path="$1"
+    local parent project name
+
+    parent=$(basename "$(dirname "$path")")
+    project=$(basename "$path")
+    name="${parent}-${project}"
+
+    # Replace invalid tmux session name characters (. and :) with _
+    echo "${name//[.:]/_}"
+}
+
+# Normalize path to absolute
+normalize_path() {
+    local path="${1:-.}"
+
+    if [[ -d "$path" ]]; then
+        echo "$(cd "$path" && pwd)"
+    elif [[ -f "$path" ]]; then
+        echo "$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+    else
+        # Path doesn't exist yet, try to resolve parent
+        local dir=$(dirname "$path")
+        local base=$(basename "$path")
+        if [[ -d "$dir" ]]; then
+            echo "$(cd "$dir" && pwd)/$base"
+        else
+            echo "$path"
+        fi
+    fi
+}
+
+# Validate path doesn't contain colon (registry delimiter)
+validate_path_no_colon() {
+    local path="$1"
+    if [[ "$path" == *:* ]]; then
+        die "Path cannot contain ':' (used as registry delimiter): $path"
+    fi
+}
+
+# Ensure config directory and default template exist
+ensure_setup() {
+    if [[ ! -d "$TEMPLATES_DIR" ]]; then
+        mkdir -p "$TEMPLATES_DIR"
+    fi
+
+    if [[ ! -f "$TEMPLATES_DIR/default" ]]; then
+        echo "$DEFAULT_TEMPLATE" > "$TEMPLATES_DIR/default"
+    fi
+
+    # Ensure registry file exists
+    touch "$REGISTRY_FILE"
+}
+
+# ==============================================================================
+# Registry Operations
+# ==============================================================================
+
+# Check if path is registered
+registry_exists() {
+    local path="$1"
+    grep -q "^${path}:" "$REGISTRY_FILE" 2>/dev/null
+}
+
+# Get template and hash for a path (returns "template:hash" or empty)
+registry_get() {
+    local path="$1"
+    grep "^${path}:" "$REGISTRY_FILE" 2>/dev/null | cut -d: -f2-3
+}
+
+# Get just the template name for a path
+registry_get_template() {
+    local path="$1"
+    grep "^${path}:" "$REGISTRY_FILE" 2>/dev/null | cut -d: -f2
+}
+
+# Get just the hash for a path
+registry_get_hash() {
+    local path="$1"
+    grep "^${path}:" "$REGISTRY_FILE" 2>/dev/null | cut -d: -f3
+}
+
+# Add entry to registry
+registry_add() {
+    local path="$1" template="$2" hash="$3"
+
+    if registry_exists "$path"; then
+        die "Path already marked: $path"
+    fi
+
+    if $DRY_RUN; then
+        dry_run_msg "Would append to $REGISTRY_FILE: ${path}:${template}:${hash}"
+    else
+        echo "${path}:${template}:${hash}" >> "$REGISTRY_FILE"
+    fi
+}
+
+# Remove entry from registry
+registry_remove() {
+    local path="$1"
+
+    if ! registry_exists "$path"; then
+        die "Path not marked: $path"
+    fi
+
+    if $DRY_RUN; then
+        dry_run_msg "Would remove from $REGISTRY_FILE: $path"
+    else
+        local tmp=$(mktemp)
+        grep -v "^${path}:" "$REGISTRY_FILE" > "$tmp" || true
+        mv "$tmp" "$REGISTRY_FILE"
+    fi
+}
+
+# Update hash for existing entry
+registry_update_hash() {
+    local path="$1" new_hash="$2"
+
+    if ! registry_exists "$path"; then
+        die "Path not marked: $path"
+    fi
+
+    local template=$(registry_get_template "$path")
+
+    if $DRY_RUN; then
+        dry_run_msg "Would update hash in $REGISTRY_FILE for $path"
+    else
+        local tmp=$(mktemp)
+        while IFS=: read -r p t h; do
+            if [[ "$p" == "$path" ]]; then
+                echo "${p}:${t}:${new_hash}"
+            else
+                echo "${p}:${t}:${h}"
+            fi
+        done < "$REGISTRY_FILE" > "$tmp"
+        mv "$tmp" "$REGISTRY_FILE"
+    fi
+}
+
+# ==============================================================================
+# Integrity Verification
+# ==============================================================================
+
+# Verify template integrity, returns 0 if ok, 1 if abort
+verify_integrity() {
+    local path="$1"
+    local session_file="$path/.tmux-session"
+
+    if [[ ! -f "$session_file" ]]; then
+        die ".tmux-session file missing in $path"
+    fi
+
+    local stored_hash=$(registry_get_hash "$path")
+    local current_hash=$(compute_hash "$session_file")
+
+    if [[ "$stored_hash" != "$current_hash" ]]; then
+        warn ".tmux-session has changed since marking."
+        echo "Hint: Run 'hop allow $path' to trust the new version." >&2
+        read -rp "Continue? [y/N] " answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# Command Handlers
+# ==============================================================================
+
+cmd_version() {
+    echo "hop $HOP_VERSION"
+}
+
+cmd_help() {
+    cat <<EOF
+${BOLD}hop${RESET} - tmux project session manager
+
+${BOLD}USAGE${RESET}
+    hop                              Fuzzy-select and attach to project session
+    hop mark <template> [path]       Register project with template
+    hop unmark [path]                Remove project from registry
+    hop allow [path]                 Trust modified .tmux-session (update hash)
+    hop refresh [path]               Re-copy template from source, update hash
+    hop list                         Show all registered projects with status
+    hop templates                    List available templates (alias: tpls)
+    hop edit                         Open registry in \$EDITOR
+    hop gc                           Remove entries for deleted directories
+    hop prune                        Kill sessions for deleted directories
+    hop self-update                  Update hop to latest version
+    hop extras [install] [names...]  List or install extra templates
+    hop completion <bash|zsh>        Output shell completions to stdout
+    hop uninstall                    Remove hop from system
+    hop version                      Print version
+    hop help                         Print this help
+
+${BOLD}FLAGS${RESET}
+    -n, --dry-run                    Preview actions without execution
+    -f, --force                      Skip confirmation prompts (refresh, prune, uninstall)
+    -d, --delete-template            Delete .tmux-session on unmark
+    -k, --keep-template              Keep .tmux-session on unmark
+    --keep-templates                 Keep templates when uninstalling
+
+${BOLD}EXAMPLES${RESET}
+    hop mark node                    Mark current directory with 'node' template
+    hop mark default ~/projects/api  Mark specific path
+    hop refresh                      Refresh template in current directory
+    hop unmark -d                    Unmark and delete .tmux-session file
+    hop -n mark web                  Dry-run: preview mark action
+    hop completion bash > ~/.local/share/bash-completion/completions/hop
+    hop extras install node python   Install specific extra templates
+
+${BOLD}FILES${RESET}
+    ~/.hop-projects                  Project registry
+    ~/.config/hop/templates/         Template directory
+
+EOF
+}
+
+cmd_templates() {
+    if [[ ! -d "$TEMPLATES_DIR" ]] || [[ -z "$(ls -A "$TEMPLATES_DIR" 2>/dev/null)" ]]; then
+        echo "No templates found in $TEMPLATES_DIR"
+        return 0
+    fi
+
+    echo "${BOLD}Available templates:${RESET}"
+    for template in "$TEMPLATES_DIR"/*; do
+        [[ -f "$template" ]] || continue
+        local name=$(basename "$template")
+        local desc=""
+        # Extract first non-shebang comment line as description
+        desc=$(grep -m1 '^# ' "$template" 2>/dev/null | sed 's/^# *//' || true)
+        if [[ -n "$desc" ]]; then
+            printf "  %-15s %s\n" "$name" "$desc"
+        else
+            printf "  %s\n" "$name"
+        fi
+    done
+}
+
+cmd_mark() {
+    local template="${1:-}"
+    local path="${2:-.}"
+
+    # Validate template
+    [[ -z "$template" ]] && die "Usage: hop mark <template> [path]. See 'hop templates' for available templates."
+
+    # Normalize path
+    path=$(normalize_path "$path")
+
+    # Validate
+    [[ ! -d "$path" ]] && die "Directory not found: $path"
+    validate_path_no_colon "$path"
+
+    local template_file="$TEMPLATES_DIR/$template"
+    [[ ! -f "$template_file" ]] && die "Template not found: $template. See 'hop templates' for available templates."
+
+    if registry_exists "$path"; then
+        die "Directory already marked: $path"
+    fi
+
+    local session_file="$path/.tmux-session"
+
+    if $DRY_RUN; then
+        dry_run_msg "Would copy $template_file to $session_file"
+        local hash=$(compute_hash "$template_file")
+        dry_run_msg "Would append to $REGISTRY_FILE: ${path}:${template}:${hash}"
+    else
+        cp "$template_file" "$session_file"
+        local hash=$(compute_hash "$session_file")
+        registry_add "$path" "$template" "$hash"
+        info "Marked: $path [$template]"
+    fi
+}
+
+cmd_unmark() {
+    local path="" delete_template=false keep_template=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete-template|-d)
+                delete_template=true
+                shift
+                ;;
+            --keep-template|-k)
+                keep_template=true
+                shift
+                ;;
+            *)
+                path="$1"
+                shift
+                ;;
+        esac
+    done
+
+    path=$(normalize_path "${path:-.}")
+
+    if ! registry_exists "$path"; then
+        die "Path not marked: $path"
+    fi
+
+    local session_file="$path/.tmux-session"
+
+    if $DRY_RUN; then
+        dry_run_msg "Would remove $path from registry"
+        if [[ -f "$session_file" ]]; then
+            if $delete_template; then
+                dry_run_msg "Would delete $session_file"
+            elif ! $keep_template; then
+                dry_run_msg "Would prompt to delete $session_file"
+            fi
+        fi
+    else
+        registry_remove "$path"
+
+        if [[ -f "$session_file" ]]; then
+            if $delete_template; then
+                rm "$session_file"
+            elif ! $keep_template; then
+                read -rp "Delete .tmux-session file? [y/N] " answer
+                if [[ "$answer" =~ ^[Yy]$ ]]; then
+                    rm "$session_file"
+                fi
+            fi
+        fi
+
+        info "Unmarked: $path"
+    fi
+}
+
+cmd_allow() {
+    local path=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        path="$1"
+        shift
+    done
+
+    path=$(normalize_path "${path:-.}")
+
+    if ! registry_exists "$path"; then
+        die "Path not marked: $path"
+    fi
+
+    local session_file="$path/.tmux-session"
+    [[ ! -f "$session_file" ]] && die ".tmux-session file not found in $path"
+
+    local new_hash=$(compute_hash "$session_file")
+
+    if $DRY_RUN; then
+        dry_run_msg "Would update hash in $REGISTRY_FILE for $path"
+    else
+        registry_update_hash "$path" "$new_hash"
+        info "Allowed: $path (hash updated)"
+    fi
+}
+
+cmd_refresh() {
+    local path="" force=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|-f)
+                force=true
+                shift
+                ;;
+            *)
+                path="$1"
+                shift
+                ;;
+        esac
+    done
+
+    path=$(normalize_path "${path:-.}")
+
+    if ! registry_exists "$path"; then
+        die "Path not marked: $path"
+    fi
+
+    local template=$(registry_get_template "$path")
+    local template_file="$TEMPLATES_DIR/$template"
+
+    [[ ! -f "$template_file" ]] && die "Template '$template' not found in $TEMPLATES_DIR"
+
+    local session_file="$path/.tmux-session"
+
+    if $DRY_RUN; then
+        dry_run_msg "Would copy $template_file to $session_file"
+        dry_run_msg "Would update hash in $REGISTRY_FILE for $path"
+    else
+        if ! $force; then
+            read -rp "Overwrite .tmux-session with template '$template'? [y/N] " answer
+            if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+                echo "Aborted."
+                return 0
+            fi
+        fi
+
+        cp "$template_file" "$session_file"
+        local new_hash=$(compute_hash "$session_file")
+        registry_update_hash "$path" "$new_hash"
+        info "Refreshed: $path [$template]"
+    fi
+}
+
+cmd_list() {
+    if [[ ! -f "$REGISTRY_FILE" ]] || [[ ! -s "$REGISTRY_FILE" ]]; then
+        echo "No projects registered. Use 'hop mark <template>' to register a project."
+        return 0
+    fi
+
+    while IFS=: read -r path template hash; do
+        [[ -z "$path" || "$path" == \#* ]] && continue
+
+        local session_name=$(get_session_name "$path")
+        local status=""
+
+        if [[ ! -d "$path" ]]; then
+            status="$SYM_ERR path missing"
+        elif [[ ! -f "$path/.tmux-session" ]]; then
+            status="$SYM_ERR .tmux-session missing"
+        else
+            local current_hash=$(compute_hash "$path/.tmux-session")
+            if [[ "$current_hash" != "$hash" ]]; then
+                status="$SYM_WARN hash mismatch"
+            else
+                status="$SYM_OK"
+            fi
+        fi
+
+        printf "%-20s %-40s [%-10s] %s\n" "$session_name" "$path" "$template" "$status"
+    done < "$REGISTRY_FILE"
+}
+
+cmd_edit() {
+    local editor="${EDITOR:-vi}"
+    "$editor" "$REGISTRY_FILE"
+}
+
+cmd_gc() {
+    if [[ ! -f "$REGISTRY_FILE" ]] || [[ ! -s "$REGISTRY_FILE" ]]; then
+        echo "Registry is empty."
+        return 0
+    fi
+
+    local removed=0
+    local tmp=$(mktemp)
+
+    while IFS=: read -r path template hash; do
+        [[ -z "$path" || "$path" == \#* ]] && continue
+
+        if [[ ! -d "$path" ]]; then
+            if $DRY_RUN; then
+                dry_run_msg "Would remove: $path"
+            else
+                echo "Removed: $path"
+            fi
+            ((removed++))
+        else
+            echo "${path}:${template}:${hash}" >> "$tmp"
+        fi
+    done < "$REGISTRY_FILE"
+
+    if ! $DRY_RUN; then
+        mv "$tmp" "$REGISTRY_FILE"
+    else
+        rm "$tmp"
+    fi
+
+    if ((removed == 0)); then
+        echo "No stale entries found."
+    else
+        echo "Removed $removed stale entries."
+    fi
+}
+
+cmd_prune() {
+    local force=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|-f)
+                force=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if ! tmux list-sessions &>/dev/null; then
+        echo "No tmux sessions running."
+        return 0
+    fi
+
+    local pruned=0
+
+    while IFS=: read -r path template hash; do
+        [[ -z "$path" || "$path" == \#* ]] && continue
+        [[ -d "$path" ]] && continue  # Path exists, skip
+
+        local session_name=$(get_session_name "$path")
+
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            if $DRY_RUN; then
+                dry_run_msg "Would kill session: $session_name"
+                ((pruned++))
+            elif $force; then
+                tmux kill-session -t "$session_name"
+                echo "Killed session: $session_name"
+                ((pruned++))
+            else
+                read -rp "Kill session '$session_name'? [y/N] " answer
+                if [[ "$answer" =~ ^[Yy]$ ]]; then
+                    tmux kill-session -t "$session_name"
+                    echo "Killed session: $session_name"
+                    ((pruned++))
+                fi
+            fi
+        fi
+    done < "$REGISTRY_FILE"
+
+    if ((pruned == 0)); then
+        echo "No orphaned sessions found."
+    fi
+}
+
+cmd_select() {
+    if [[ ! -f "$REGISTRY_FILE" ]] || [[ ! -s "$REGISTRY_FILE" ]]; then
+        echo "No projects registered. Use 'hop mark <template>' to register a project."
+        return 0
+    fi
+
+    # Extract paths from registry for fzf
+    local paths=$(cut -d: -f1 "$REGISTRY_FILE" | grep -v '^#' | grep -v '^$')
+
+    if [[ -z "$paths" ]]; then
+        echo "No projects registered."
+        return 0
+    fi
+
+    # Build preview command
+    # Note: fzf uses $SHELL for preview which may not have PATH set correctly
+    local preview_cmd
+    preview_cmd="bash -c '
+        path={}
+        parent=\$(basename \"\$(dirname \"\$path\")\")
+        project=\$(basename \"\$path\")
+        session=\$(echo \"\${parent}-\${project}\" | tr \".:\" \"_\")
+        if tmux has-session -t \"\$session\" 2>/dev/null; then
+            echo \"Session: \$session (active)\"
+            echo \"---\"
+            tmux list-windows -t \"\$session\"
+        elif [[ -d \"\$path/.git\" ]]; then
+            echo \"Session: \$session (not started)\"
+            echo \"---\"
+            git -C \"\$path\" log --oneline -5 2>/dev/null || ls -la \"\$path\"
+        else
+            echo \"Session: \$session (not started)\"
+            echo \"---\"
+            ls -la \"\$path\"
+        fi
+    '"
+
+    # Run fzf
+    local selected
+    selected=$(echo "$paths" | fzf --preview "$preview_cmd" --preview-window=right:50%) || {
+        # User cancelled or empty selection
+        return 0
+    }
+
+    [[ -z "$selected" ]] && return 0
+
+    local session_name=$(get_session_name "$selected")
+
+    if $DRY_RUN; then
+        if ! tmux has-session -t "$session_name" 2>/dev/null; then
+            dry_run_msg "Would create session: $session_name"
+            dry_run_msg "Would source: $selected/.tmux-session"
+        fi
+        if [[ -n "${TMUX:-}" ]]; then
+            dry_run_msg "Would switch to session: $session_name"
+        else
+            dry_run_msg "Would attach to session: $session_name"
+        fi
+        return 0
+    fi
+
+    # Create session if it doesn't exist
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        # Verify integrity before sourcing
+        if ! verify_integrity "$selected"; then
+            return 1
+        fi
+
+        # Create detached session
+        tmux new-session -d -s "$session_name" -c "$selected"
+
+        # Source template with variables
+        export SESSION_NAME="$session_name"
+        export PROJECT_PATH="$selected"
+        source "$selected/.tmux-session"
+    fi
+
+    # Attach or switch
+    if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "$session_name"
+    else
+        tmux attach-session -t "$session_name"
+    fi
+}
+
+# ==============================================================================
+# Installation & Update Commands
+# ==============================================================================
+
+# Compare semver versions: returns 0 if $1 > $2
+version_gt() {
+    local v1=(${1//./ }) v2=(${2//./ })
+    for i in 0 1 2; do
+        if ((${v1[i]:-0} > ${v2[i]:-0})); then return 0; fi
+        if ((${v1[i]:-0} < ${v2[i]:-0})); then return 1; fi
+    done
+    return 1  # equal
+}
+
+cmd_self_update() {
+    local current_version="$HOP_VERSION"
+
+    echo "Checking for updates..."
+
+    # Get latest release from GitHub API
+    local latest
+    latest=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+
+    if [[ -z "$latest" ]]; then
+        die "Failed to check for updates. Check your internet connection."
+    fi
+
+    if version_gt "$latest" "$current_version"; then
+        echo "New version available: $latest (current: $current_version)"
+        echo "Updating..."
+        curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh" | bash
+    else
+        info "Already at latest version ($current_version)"
+    fi
+}
+
+cmd_extras() {
+    local action="${1:-}"
+    shift || true
+
+    case "$action" in
+        ""|list)
+            echo "${BOLD}Available extra templates:${RESET}"
+            echo "  node      Node.js project (editor, server, shell)"
+            echo "  python    Python project (editor, venv shell)"
+            echo "  go        Go project (editor, build, test)"
+            echo "  rust      Rust project (editor, cargo watch)"
+            echo "  docker    Docker project (editor, compose, logs)"
+            echo ""
+            echo "Install with: hop extras install [names...]"
+            echo "Install all:  hop extras install"
+            ;;
+        install)
+            local templates=("$@")
+            if [[ ${#templates[@]} -eq 0 ]]; then
+                templates=(node python go rust docker)
+            fi
+
+            # Get current version
+            local version="$HOP_VERSION"
+            local tarball_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/hop-v${version}.tar.gz"
+
+            echo "Downloading extras for v${version}..."
+            local tmp_dir=$(mktemp -d)
+
+            if ! curl -fsSL "$tarball_url" | tar -xz -C "$tmp_dir" 2>/dev/null; then
+                # Try latest release if current version not found
+                local latest_url
+                latest_url=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tarball_url":' | sed -E 's/.*"([^"]+)".*/\1/')
+                if [[ -n "$latest_url" ]]; then
+                    curl -fsSL "$latest_url" | tar -xz -C "$tmp_dir" 2>/dev/null || die "Failed to download extras"
+                else
+                    rm -rf "$tmp_dir"
+                    die "Failed to download extras"
+                fi
+            fi
+
+            local extras_dir=$(find "$tmp_dir" -type d -name "extras" | head -1)
+            if [[ -z "$extras_dir" || ! -d "$extras_dir/templates" ]]; then
+                rm -rf "$tmp_dir"
+                die "No extras found in release"
+            fi
+
+            local installed=0
+            for t in "${templates[@]}"; do
+                if [[ -f "$extras_dir/templates/$t" ]]; then
+                    cp "$extras_dir/templates/$t" "$TEMPLATES_DIR/"
+                    echo "  Installed: $t"
+                    ((installed++))
+                else
+                    warn "Template not found: $t"
+                fi
+            done
+
+            rm -rf "$tmp_dir"
+
+            if ((installed > 0)); then
+                info "Installed $installed template(s)"
+            fi
+            ;;
+        *)
+            die "Unknown extras command: $action. Use 'hop extras' or 'hop extras install'"
+            ;;
+    esac
+}
+
+cmd_completion() {
+    local shell="${1:-}"
+
+    case "$shell" in
+        bash)
+            cat <<'BASH_COMPLETION'
+# Bash completion for hop
+_hop() {
+    local cur prev words cword
+    _init_completion || return
+
+    local commands="mark unmark allow refresh list templates tpls edit gc prune version help self-update extras completion uninstall"
+
+    local cmd=""
+    for ((i=1; i < cword; i++)); do
+        case "${words[i]}" in
+            -n|--dry-run) continue ;;
+            mark|unmark|allow|refresh|list|templates|tpls|edit|gc|prune|version|help|self-update|extras|completion|uninstall)
+                cmd="${words[i]}"
+                break ;;
+        esac
+    done
+
+    if [[ -z "$cmd" ]]; then
+        COMPREPLY=($(compgen -W "$commands -n --dry-run" -- "$cur"))
+        return
+    fi
+
+    case "$cmd" in
+        mark)
+            local templates_dir="${HOME}/.config/hop/templates"
+            if [[ -d "$templates_dir" ]]; then
+                local templates=$(find "$templates_dir" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null)
+                COMPREPLY=($(compgen -W "$templates" -- "$cur"))
+            fi
+            ;;
+        unmark) COMPREPLY=($(compgen -W "-d --delete-template -k --keep-template" -- "$cur")) ;;
+        refresh|prune) COMPREPLY=($(compgen -W "-f --force" -- "$cur")) ;;
+        completion) COMPREPLY=($(compgen -W "bash zsh --how-to" -- "$cur")) ;;
+        extras) COMPREPLY=($(compgen -W "list install" -- "$cur")) ;;
+        uninstall) COMPREPLY=($(compgen -W "-f --force --keep-templates" -- "$cur")) ;;
+    esac
+}
+complete -F _hop hop
+BASH_COMPLETION
+            ;;
+        zsh)
+            cat <<'ZSH_COMPLETION'
+#compdef hop
+
+_hop() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local -a commands
+    commands=(
+        'mark:Register project with template'
+        'unmark:Remove project from registry'
+        'allow:Trust modified .tmux-session'
+        'refresh:Re-copy template from source'
+        'list:Show all registered projects'
+        'templates:List available templates'
+        'tpls:List available templates (alias)'
+        'edit:Open registry in editor'
+        'gc:Remove entries for deleted directories'
+        'prune:Kill sessions for deleted directories'
+        'version:Print version'
+        'help:Print usage'
+        'self-update:Update hop to latest version'
+        'extras:Manage extra templates'
+        'completion:Output shell completions'
+        'uninstall:Remove hop from system'
+    )
+
+    _arguments -C \
+        '(-n --dry-run)'{-n,--dry-run}'[Preview actions]' \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command) _describe -t commands 'hop command' commands ;;
+        args)
+            case $line[1] in
+                mark)
+                    local templates_dir="${HOME}/.config/hop/templates"
+                    _arguments '1:template:_files -W "$templates_dir"' '2:path:_files -/'
+                    ;;
+                unmark) _arguments '(-d --delete-template)'{-d,--delete-template}'[Delete template]' '(-k --keep-template)'{-k,--keep-template}'[Keep template]' ;;
+                refresh|prune) _arguments '(-f --force)'{-f,--force}'[Skip confirmation]' ;;
+                completion) _arguments '1:shell:(bash zsh --how-to)' ;;
+                extras) _arguments '1:action:(list install)' ;;
+                uninstall) _arguments '(-f --force)'{-f,--force}'[Skip confirmation]' '--keep-templates[Keep templates]' ;;
+            esac
+            ;;
+    esac
+}
+
+_hop "$@"
+ZSH_COMPLETION
+            ;;
+        --how-to)
+            cat <<EOF
+${BOLD}Shell Completion Setup${RESET}
+
+${BOLD}Bash:${RESET}
+  hop completion bash > ~/.local/share/bash-completion/completions/hop
+
+  Or add to ~/.bashrc:
+    eval "\$(hop completion bash)"
+
+${BOLD}Zsh:${RESET}
+  hop completion zsh > ~/.zsh/completions/_hop
+
+  Make sure ~/.zsh/completions is in your fpath (add to ~/.zshrc before compinit):
+    fpath=(~/.zsh/completions \$fpath)
+    autoload -Uz compinit && compinit
+
+EOF
+            ;;
+        "")
+            die "Usage: hop completion <bash|zsh|--how-to>"
+            ;;
+        *)
+            die "Unknown shell: $shell. Supported: bash, zsh"
+            ;;
+    esac
+}
+
+cmd_uninstall() {
+    local force=false keep_templates=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|-f) force=true; shift ;;
+            --keep-templates) keep_templates=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if ! $force; then
+        echo "This will remove hop and all configuration."
+        if ! $keep_templates; then
+            echo "Your templates in ~/.config/hop/templates/ will also be deleted."
+            echo "Use --keep-templates to preserve them."
+        fi
+        read -rp "Continue? [y/N] " answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            return 0
+        fi
+    fi
+
+    echo "Removing hop..."
+
+    # Remove binary
+    rm -f "$HOME/.local/bin/hop"
+
+    # Remove man page
+    rm -f "$HOME/.local/share/man/man1/hop.1"
+
+    # Remove config (optionally keep templates)
+    if $keep_templates; then
+        rm -f "$VERSION_FILE"
+        echo "Kept templates in $TEMPLATES_DIR"
+    else
+        rm -rf "$HOME/.config/hop"
+    fi
+
+    echo ""
+    echo "If you installed shell completions, remove them manually:"
+    echo "  rm ~/.local/share/bash-completion/completions/hop  # bash"
+    echo "  rm ~/.zsh/completions/_hop                         # zsh"
+    echo ""
+    info "hop uninstalled successfully"
+}
+
+# ==============================================================================
+# Signal Handling
+# ==============================================================================
+
+cleanup() {
+    # Cleanup on exit if needed
+    :
+}
+
+trap cleanup EXIT
+trap 'exit 0' SIGINT
+trap 'exit 143' SIGTERM
+
+# ==============================================================================
+# Main Entry Point
+# ==============================================================================
+
+main() {
+    check_bash_version
+    check_dependencies
+    ensure_setup
+
+    # Parse global flags first
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run|-n)
+                DRY_RUN=true
+                shift
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Restore positional arguments
+    set -- "${args[@]+"${args[@]}"}"
+
+    # Route to command
+    if [[ $# -eq 0 ]]; then
+        cmd_select
+        return
+    fi
+
+    case "$1" in
+        version)
+            cmd_version
+            ;;
+        help)
+            cmd_help
+            ;;
+        mark)
+            shift
+            cmd_mark "$@"
+            ;;
+        unmark)
+            shift
+            cmd_unmark "$@"
+            ;;
+        allow)
+            shift
+            cmd_allow "$@"
+            ;;
+        refresh)
+            shift
+            cmd_refresh "$@"
+            ;;
+        list)
+            cmd_list
+            ;;
+        templates|tpls)
+            cmd_templates
+            ;;
+        edit)
+            cmd_edit
+            ;;
+        gc)
+            cmd_gc
+            ;;
+        prune)
+            shift
+            cmd_prune "$@"
+            ;;
+        self-update)
+            cmd_self_update
+            ;;
+        extras)
+            shift
+            cmd_extras "$@"
+            ;;
+        completion)
+            shift
+            cmd_completion "$@"
+            ;;
+        uninstall)
+            shift
+            cmd_uninstall "$@"
+            ;;
+        *)
+            die "Unknown command: $1. See 'hop help' for usage."
+            ;;
+    esac
+}
+
+main "$@"

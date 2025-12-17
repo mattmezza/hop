@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Node.js project - editor, server, shell
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+tmux send-keys -t "$SESSION_NAME:1" "${EDITOR:-nvim} ." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "server"
+tmux send-keys -t "$SESSION_NAME:server" "npm run dev" C-m
+
+tmux new-window -t "$SESSION_NAME" -n "shell"
+
+tmux select-window -t "$SESSION_NAME:1"

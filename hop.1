@@ -1,0 +1,233 @@
+.TH HOP 1 "December 2024" "hop 0.1" "User Commands"
+.SH NAME
+hop \- tmux project session manager
+.SH SYNOPSIS
+.B hop
+.RI [ command ]
+.RI [ options ]
+.RI [ arguments ]
+.SH DESCRIPTION
+.B hop
+is a CLI utility for tmux project management. It maintains a registry of "marked" project directories, each associated with a session template. The tool handles session creation, switching, and the tmux nesting problem while providing registry maintenance utilities.
+.SH COMMANDS
+.TP
+.B hop
+Without arguments, opens fuzzy selector (fzf) to pick a project and attach to its tmux session.
+.TP
+.BI "hop mark " "template " "[path]"
+Register a project directory with the specified template. Template is copied to
+.I <path>/.tmux-session
+and a SHA-256 hash is stored in the registry for integrity verification.
+.TP
+.BI "hop unmark " "[path]"
+Remove a project from the registry. Prompts to delete the
+.I .tmux-session
+file unless
+.B \-d
+or
+.B \-k
+is specified.
+.TP
+.BI "hop allow " "[path]"
+Trust a modified
+.I .tmux-session
+file by updating its hash in the registry. Use this after intentionally editing the session template.
+.TP
+.BI "hop refresh " "[path]"
+Re-copy the original template from
+.I ~/.config/hop/templates/
+to the project's
+.I .tmux-session
+file, updating the stored hash.
+.TP
+.B hop list
+Show all registered projects with their session names, paths, templates, and integrity status.
+.TP
+.B hop templates
+List available templates from
+.IR ~/.config/hop/templates/ .
+Alias:
+.BR tpls .
+.TP
+.B hop edit
+Open the registry file in
+.B $EDITOR
+(falls back to
+.BR vi ).
+.TP
+.B hop gc
+Garbage collection. Remove registry entries for directories that no longer exist.
+.TP
+.B hop prune
+Kill tmux sessions whose project directories no longer exist.
+.TP
+.B hop self-update
+Check for updates and install the latest version if available.
+.TP
+.BI "hop extras " "[install] " "[names...]"
+List or install extra templates. Without arguments, lists available extras.
+Use
+.B hop extras install
+to install all extras, or specify template names.
+.TP
+.BI "hop completion " "<bash|zsh|--how-to>"
+Output shell completions to stdout. Redirect to appropriate file:
+.RS
+.nf
+hop completion bash > ~/.local/share/bash-completion/completions/hop
+hop completion zsh > ~/.zsh/completions/_hop
+.fi
+.RE
+Use
+.B --how-to
+for installation instructions.
+.TP
+.B hop uninstall
+Remove hop from the system. Prompts for confirmation unless
+.B -f
+is specified.
+Use
+.B --keep-templates
+to preserve templates.
+.TP
+.B hop version
+Print version information.
+.TP
+.B hop help
+Print usage information.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-dry\-run
+Preview actions without execution. Can be used with most commands.
+.TP
+.BR \-f ", " \-\-force
+Skip confirmation prompts. Used with
+.BR refresh ,
+.BR prune ,
+and
+.BR uninstall .
+.TP
+.BR \-d ", " \-\-delete\-template
+Delete the
+.I .tmux-session
+file when unmarking. Used with
+.BR unmark .
+.TP
+.BR \-k ", " \-\-keep\-template
+Keep the
+.I .tmux-session
+file when unmarking. Used with
+.BR unmark .
+.TP
+.B \-\-keep\-templates
+Preserve templates directory when uninstalling. Used with
+.BR uninstall .
+.SH FILES
+.TP
+.I ~/.local/bin/hop
+Main executable script.
+.TP
+.I ~/.local/share/man/man1/hop.1
+Man page.
+.TP
+.I ~/.hop-projects
+Project registry. Plain text file with format:
+.IR path:template:sha256hash .
+.TP
+.I ~/.config/hop/.version
+Installed version file.
+.TP
+.I ~/.config/hop/templates/
+Template directory. Each file is a bash script that configures tmux windows and panes.
+.TP
+.I <project>/.tmux-session
+Per-project session configuration, copied from template at mark time.
+.SH TEMPLATES
+Templates are bash scripts sourced with these variables available:
+.TP
+.B $SESSION_NAME
+Computed session name (parent-project format).
+.TP
+.B $PROJECT_PATH
+Absolute path to the project directory.
+.PP
+Example template:
+.PP
+.RS
+.nf
+#!/usr/bin/env bash
+# Node.js project template
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+tmux send-keys -t "$SESSION_NAME:1" "nvim ." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "server"
+tmux send-keys -t "$SESSION_NAME:server" "npm run dev" C-m
+
+tmux select-window -t "$SESSION_NAME:1"
+.fi
+.RE
+.SH SESSION NAMING
+Session names are derived from the project path using the format:
+.IR parent-project .
+For example,
+.I /home/user/work/api
+becomes
+.IR work-api .
+Characters invalid for tmux session names (. and :) are replaced with underscore.
+.SH EXAMPLES
+.TP
+.B hop mark node
+Mark current directory with the 'node' template.
+.TP
+.B hop mark default ~/projects/api
+Mark a specific directory with the 'default' template.
+.TP
+.B hop list
+Show all registered projects.
+.TP
+.B hop
+Open fuzzy selector and attach to chosen project.
+.TP
+.B hop allow
+Trust changes to .tmux-session in current directory.
+.TP
+.B hop refresh -f
+Refresh template without confirmation.
+.TP
+.B hop -n mark web
+Dry-run: preview what mark would do.
+.TP
+.B hop unmark -d
+Unmark current directory and delete .tmux-session file.
+.TP
+.B hop self-update
+Check for and install latest version.
+.TP
+.B hop extras install node python
+Install node and python extra templates.
+.TP
+.B hop completion bash > ~/.local/share/bash-completion/completions/hop
+Install bash completions.
+.SH EXIT STATUS
+.TP
+.B 0
+Success, or user cancelled fzf selection.
+.TP
+.B 1
+Error (missing dependency, invalid arguments, etc.)
+.SH DEPENDENCIES
+.B bash
+(4.0+),
+.B tmux
+(3.0+),
+.B fzf
+(any),
+.BR sha256sum .
+Optional:
+.B git
+for enhanced preview.
+.SH AUTHOR
+Written by mattmezza.
+.SH SEE ALSO
+.BR tmux (1),
+.BR fzf (1)

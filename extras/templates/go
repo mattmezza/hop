@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Go project - editor, build, test
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+tmux send-keys -t "$SESSION_NAME:1" "${EDITOR:-nvim} ." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "build"
+tmux send-keys -t "$SESSION_NAME:build" "go build ./..." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "test"
+tmux send-keys -t "$SESSION_NAME:test" "go test ./..."
+
+tmux select-window -t "$SESSION_NAME:1"

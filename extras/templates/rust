@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Rust project - editor, cargo watch
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+tmux send-keys -t "$SESSION_NAME:1" "${EDITOR:-nvim} ." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "watch"
+if command -v cargo-watch &>/dev/null; then
+    tmux send-keys -t "$SESSION_NAME:watch" "cargo watch -x check -x test" C-m
+else
+    tmux send-keys -t "$SESSION_NAME:watch" "cargo build"
+fi
+
+tmux new-window -t "$SESSION_NAME" -n "shell"
+
+tmux select-window -t "$SESSION_NAME:1"

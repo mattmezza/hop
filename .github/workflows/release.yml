@@ -1,0 +1,42 @@
+name: Build Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p "hop-${VERSION}"
+
+          # Copy main files
+          cp hop "hop-${VERSION}/"
+          cp hop.1 "hop-${VERSION}/"
+          cp install.sh "hop-${VERSION}/"
+
+          # Copy templates
+          mkdir -p "hop-${VERSION}/templates"
+          cp templates/default "hop-${VERSION}/templates/"
+
+          # Copy extras if they exist
+          if [[ -d "extras" ]]; then
+            cp -r extras "hop-${VERSION}/"
+          fi
+
+          # Create tarball
+          tar -czvf "hop-${VERSION}.tar.gz" "hop-${VERSION}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hop-*.tar.gz

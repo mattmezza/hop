@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Python project - editor, venv shell
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+if [[ -d ".venv" ]]; then
+    tmux send-keys -t "$SESSION_NAME:1" "source .venv/bin/activate && ${EDITOR:-nvim} ." C-m
+else
+    tmux send-keys -t "$SESSION_NAME:1" "${EDITOR:-nvim} ." C-m
+fi
+
+tmux new-window -t "$SESSION_NAME" -n "shell"
+if [[ -d ".venv" ]]; then
+    tmux send-keys -t "$SESSION_NAME:shell" "source .venv/bin/activate" C-m
+fi
+
+tmux select-window -t "$SESSION_NAME:1"

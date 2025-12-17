@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Docker project - editor, compose, logs
+# Available variables: $SESSION_NAME, $PROJECT_PATH
+
+tmux rename-window -t "$SESSION_NAME:1" "edit"
+tmux send-keys -t "$SESSION_NAME:1" "${EDITOR:-nvim} ." C-m
+
+tmux new-window -t "$SESSION_NAME" -n "compose"
+tmux send-keys -t "$SESSION_NAME:compose" "docker compose up -d && docker compose ps"
+
+tmux new-window -t "$SESSION_NAME" -n "logs"
+tmux send-keys -t "$SESSION_NAME:logs" "docker compose logs -f"
+
+tmux select-window -t "$SESSION_NAME:1"
